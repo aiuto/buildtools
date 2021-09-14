@@ -19,9 +19,12 @@ buildozer [OPTIONS] ['command args' | -f FILE ] label-list
 ```
 
 Here, `label-list` is a space-separated list of Bazel labels, for example
-`//path/to/pkg1:rule1 //path/to/pkg2:rule2`. Buildozer reads commands from
-`FILE` (`-` for stdin (format: `|`-separated command line arguments to buildozer,
-excluding flags))
+`//path/to/pkg1:rule1 //path/to/pkg2:rule2`.
+
+When `-f FILE` is used, buildozer reads commands from `FILE` (`-` for stdin).
+Format: lines of `|`-separated sets of commands and labels (`command args|label|label...`).
+When the label is a single '*', then the command will be applied to all
+elements of label-list from the command line.
 
 You should specify at least one command and one target. Buildozer will execute
 all commands on all targets. Commands are executed in order, files are processed
@@ -84,7 +87,8 @@ Buildozer supports the following commands(`'command args'`):
   * `move <old_attr> <new_attr> <value(s)>`: Moves `value(s)` from the list `old_attr`
     to the list `new_attr`. The wildcard `*` matches all values.
   * `new <rule_kind> <rule_name> [(before|after) <relative_rule_name>]`: Add a
-    new rule at the end of the BUILD file (before/after `<relative_rule>`).
+    new rule at the end of the BUILD file (before/after `<relative_rule>`). The
+    identifier `__pkg__` can be used to position rules relative to package().
   * `print <attr(s)>`
   * `remove <attr>`: Removes attribute `attr`.
   * `remove <attr> <value(s)>`: Removes `value(s)` from the list `attr`. The

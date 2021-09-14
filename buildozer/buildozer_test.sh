@@ -1231,6 +1231,26 @@ java_library(name = "foo")
 cc_test(name = "b")'
 }
 
+function test_new_after_package() {
+  in='
+load("/foo/bar", "x", "y", "z")
+package(default_visibility = "//visibility:public")
+
+cc_test(name = "a")
+
+cc_test(name = "b")'
+  run "$in" 'new java_library foo after __pkg__' 'pkg/BUILD'
+  assert_equals 'load("/foo/bar", "x", "y", "z")
+
+package(default_visibility = "//visibility:public")
+
+java_library(name = "foo")
+
+cc_test(name = "a")
+
+cc_test(name = "b")'
+}
+
 function test_not_enough_arguments() {
   ERROR=1 run "$one_dep" 'add foo' '//pkg:edit'
   assert_err "Too few arguments for command 'add', expected at least 2."
@@ -1851,6 +1871,35 @@ load(":baz.bzl", "baz")  # this is @unused
 # after
 
 foobar()'
+}
+
+function test_commands_with_targets() {
+  mkdir -p pkg1
+  mkdir -p pkg2
+
+  cat > pkg1/BUILD <<EOF
+rule(name = "r1", deps = [":bar"], compatible_with=["//env:a"])
+EOF
+  cat > pkg2/BUILD <<EOF
+rule(name = "r2", compatible_with=["//env:a"])
+EOF
+
+  cat > commands <<EOF
+remove compatible_with //env:a|*
+add deps :baz|*
+EOF
+  $buildozer --buildifier= -f commands pkg1:* pkg2:*
+  assert_equals 'rule(
+    name = "r1",
+    deps = [
+        ":bar",
+        ":baz",
+    ],
+)' pkg1
+  assert_equals 'rule(
+    name = "r2",
+    deps = [":baz"],
+)' pkg2
 }
 
 run_suite "buildozer tests"
