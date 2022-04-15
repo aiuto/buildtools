@@ -38,6 +38,7 @@ import (
 	"github.com/bazelbuild/buildtools/file"
 	"github.com/bazelbuild/buildtools/labels"
 	"github.com/bazelbuild/buildtools/wspace"
+	"github.com/golang/protobuf/jsonpb"
 	"github.com/golang/protobuf/proto"
 )
 
@@ -55,6 +56,7 @@ type Options struct {
 	Quiet             bool      // suppress informational messages.
 	EditVariables     bool      // for attributes that simply assign a variable (e.g. hdrs = LIB_HDRS), edit the build variable instead of appending to the attribute.
 	IsPrintingProto   bool      // output serialized devtools.buildozer.Output protos instead of human-readable strings
+	IsPrintingJSON    bool      // output serialized devtools.buildozer.Output json instead of human-readable strings
 	OutWriter         io.Writer // where to write normal output (`os.Stdout` will be used if not specified)
 	ErrWriter         io.Writer // where to write error output (`os.Stderr` will be used if not specified)
 }
@@ -341,6 +343,8 @@ func cmdPrint(opts *Options, env CmdEnvironment) (*build.File, error) {
 			fields[i] = &apipb.Output_Record_Field{Value: &apipb.Output_Record_Field_Number{int32(env.Rule.Call.ListStart.Line)}}
 		} else if str == "endline" {
 			fields[i] = &apipb.Output_Record_Field{Value: &apipb.Output_Record_Field_Number{int32(env.Rule.Call.End.Pos.Line)}}
+		} else if str == "path" {
+			fields[i] = &apipb.Output_Record_Field{Value: &apipb.Output_Record_Field_Text{env.File.Path}}
 		} else if value == nil {
 			fmt.Fprintf(opts.ErrWriter, "rule \"//%s:%s\" has no attribute \"%s\"\n",
 				env.Pkg, env.Rule.Name(), str)
@@ -572,6 +576,9 @@ func cmdDictAdd(opts *Options, env CmdEnvironment) (*build.File, error) {
 
 	for _, x := range args {
 		kv := strings.SplitN(x, ":", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("no colon in dict_add argument %q found", x)
+		}
 		expr := getStringExpr(kv[1], env.Pkg)
 
 		prev := DictionaryGet(dict, kv[0])
@@ -597,6 +604,9 @@ func cmdDictSet(opts *Options, env CmdEnvironment) (*build.File, error) {
 
 	for _, x := range args {
 		kv := strings.SplitN(x, ":", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("no colon in dict_set argument %q found", x)
+		}
 		expr := getStringExpr(kv[1], env.Pkg)
 		// Set overwrites previous values.
 		DictionarySet(dict, kv[0], expr)
@@ -813,9 +823,13 @@ func SplitOnSpaces(input string) []string {
 //   whitespace
 // - a target all commands that are parsed during one call to parseCommands
 //   should be applied on
-func parseCommands(opts *Options, args []string) (commands []command, targets []string) {
+func parseCommands(opts *Options, args []string) (commands []command, targets []string, err error) {
 	for _, arg := range args {
 		commandTokens := SplitOnSpaces(arg)
+		if len(commandTokens) == 0 {
+			return nil, nil, fmt.Errorf("empty command list")
+		}
+
 		cmd, found := AllCommands[commandTokens[0]]
 		if found {
 			checkCommandUsage(opts, commandTokens[0], cmd, len(commandTokens)-1)
@@ -885,8 +899,10 @@ type Buildifier interface {
 	Buildify(*Options, *build.File) ([]byte, error)
 }
 
-var buildifier Buildifier = &defaultBuildifier{}
-var buildifierRegistered = false
+var (
+	buildifier           Buildifier = &defaultBuildifier{}
+	buildifierRegistered            = false
+)
 
 // RegisterBuildifier replaces the default buildifier with an
 // alternative implementation.
@@ -969,7 +985,6 @@ func rewrite(opts *Options, commandsForFile commandsForFile) *rewriteResult {
 			errs = append(errs, cerr)
 			if !opts.KeepGoing {
 				return &rewriteResult{file: name, errs: errs, records: records}
-
 			}
 		}
 		targets = filterRules(opts, targets)
@@ -1090,8 +1105,11 @@ func findBuildFiles(rootDir string) []string {
 
 // appendCommands adds the given commands to be applied to each of the given targets
 // via the commandMap.
-func appendCommands(opts *Options, commandMap map[string][]commandsForTarget, args []string) {
-	commands, targets := parseCommands(opts, args)
+func appendCommands(opts *Options, commandMap map[string][]commandsForTarget, args []string) error {
+	commands, targets, err := parseCommands(opts, args)
+	if err != nil {
+		return err
+	}
 	for _, target := range targets {
 		for _, buildFileName := range BuildFileNames {
 			if strings.HasSuffix(target, filepath.FromSlash("/"+buildFileName)) {
@@ -1111,9 +1129,10 @@ func appendCommands(opts *Options, commandMap map[string][]commandsForTarget, ar
 			commandMap[file] = append(commandMap[file], commandsForTarget{target, commands})
 		}
 	}
+	return nil
 }
 
-func appendCommandsFromFiles(opts *Options, commandsByFile map[string][]commandsForTarget, labels []string) {
+func appendCommandsFromFiles(opts *Options, commandsByFile map[string][]commandsForTarget, labels []string) error {
 	for _, fileName := range opts.CommandsFiles {
 		var reader io.Reader
 		if fileName == stdinPackageName {
@@ -1123,11 +1142,14 @@ func appendCommandsFromFiles(opts *Options, commandsByFile map[string][]commands
 			reader = rc
 			defer rc.Close()
 		}
-		appendCommandsFromReader(opts, reader, commandsByFile, labels)
+		if err := appendCommandsFromReader(opts, reader, commandsByFile, labels); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func appendCommandsFromReader(opts *Options, reader io.Reader, commandsByFile map[string][]commandsForTarget, labels []string) {
+func appendCommandsFromReader(opts *Options, reader io.Reader, commandsByFile map[string][]commandsForTarget, labels []string) error {
 	r := bufio.NewReader(reader)
 	atEOF := false
 	for !atEOF {
@@ -1137,8 +1159,7 @@ func appendCommandsFromReader(opts *Options, reader io.Reader, commandsByFile ma
 			err = nil
 		}
 		if err != nil {
-			fmt.Fprintf(opts.ErrWriter, "Error while reading commands file: %v", err)
-			return
+			return fmt.Errorf("error while reading commands file: %v", err)
 		}
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -1147,11 +1168,16 @@ func appendCommandsFromReader(opts *Options, reader io.Reader, commandsByFile ma
 		args := strings.Split(line, "|")
 		if len(args) > 1 && args[1] == "*" {
 			cmd := append([]string{args[0]}, labels...)
-			appendCommands(opts, commandsByFile, cmd)
+			if err := appendCommands(opts, commandsByFile, cmd); err != nil {
+				return err
+			}
 		} else {
-			appendCommands(opts, commandsByFile, args)
+			if err := appendCommands(opts, commandsByFile, args); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func printRecord(writer io.Writer, record *apipb.Output_Record) {
@@ -1198,12 +1224,18 @@ func Buildozer(opts *Options, args []string) int {
 	}
 	commandsByFile := make(map[string][]commandsForTarget)
 	if len(opts.CommandsFiles) > 0 {
-		appendCommandsFromFiles(opts, commandsByFile, args)
+		if err := appendCommandsFromFiles(opts, commandsByFile, args); err != nil {
+			fmt.Fprintf(opts.ErrWriter, "error: %s\n", err)
+			return 1
+		}
 	} else {
 		if len(args) == 0 {
 			Usage()
 		}
-		appendCommands(opts, commandsByFile, args)
+		if err := appendCommands(opts, commandsByFile, args); err != nil {
+			fmt.Fprintf(opts.ErrWriter, "error: %s\n", err)
+			return 1
+		}
 	}
 
 	numFiles := len(commandsByFile)
@@ -1256,6 +1288,12 @@ func Buildozer(opts *Options, args []string) int {
 			log.Fatal("marshaling error: ", err)
 		}
 		fmt.Fprintf(opts.OutWriter, "%s", data)
+	} else if opts.IsPrintingJSON {
+		marshaler := jsonpb.Marshaler{}
+		if err := marshaler.Marshal(opts.OutWriter, &apipb.Output{Records: records}); err != nil {
+			log.Fatal("json marshaling error: ", err)
+		}
+		fmt.Fprintln(opts.OutWriter)
 	} else {
 		for _, record := range records {
 			printRecord(opts.OutWriter, record)
