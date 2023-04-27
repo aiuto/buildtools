@@ -34,7 +34,7 @@ buildifier="$(rlocation "$buildifier")"
 buildifier2="$(rlocation "$buildifier2")"
 
 touch WORKSPACE.bazel
-rm -r test_dir || true
+[[ -d test_dir ]] && rm -r test_dir
 mkdir -p test_dir/subdir
 mkdir -p golden
 INPUT="load(':foo.bzl', 'foo'); foo(tags=['b', 'a'],srcs=['d', 'c'])"  # formatted differently in build and bzl modes
@@ -45,6 +45,7 @@ echo -e "$INPUT" > test_dir/subdir/build  # lowercase, should be ignored by -r
 echo -e "$INPUT" > test.bzl  # outside the test_dir directory
 echo -e "$INPUT" > test2.bzl  # outside the test_dir directory
 echo -e "not valid +" > test_dir/foo.bar
+echo -e '{ "type": "build" }' > test_dir/.buildifier.test.json # demonstrate config file works by overriding input type to format a bzl file as a BUILD file.
 mkdir test_dir/workspace  # name of a starlark file, but a directory
 mkdir test_dir/.git  # contents should be ignored
 echo -e "a+b" > test_dir/.git/git.bzl
@@ -67,7 +68,7 @@ use_repo(
     "bazel_gazelle_go_repository_config",
     "bazel_gazelle_go_repository_cache",
 )
-rules_go_non_module_deps = use_extension("@io_bazel_rules_go//go/private:extensions.bzl","non_module_dependencies")
+rules_go_non_module_deps = use_extension("@io_bazel_rules_go//go/private:extensions.bzl","non_module_dependencies",dev_dependency=True)
 use_repo(rules_go_non_module_deps,"go_googleapis")
 go_deps  =  use_extension("//:extensions.bzl",  "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
@@ -110,6 +111,12 @@ use_repo(
     "b",
     "a",
 )
+
+bazel_dep(name='prod_dep',version='3.19.0')
+bazel_dep(name='other_prod_dep',version='3.19.0',dev_dependency=False)
+bazel_dep(name='dev_dep',version='3.19.0',dev_dependency=True)
+bazel_dep(name = "weird_dep", version = "3.19.0", dev_dependency = "True" == "True")
+bazel_dep(name='yet_another_prod_dep',version='3.19.0')
 EOF
 
 cp test_dir/foo.bar golden/foo.bar
@@ -120,6 +127,8 @@ cp test_dir/.git/git.bzl golden/git.bzl
 "$buildifier" -r test_dir
 "$buildifier" test.bzl
 "$buildifier" --path=foo.bzl test2.bzl
+"$buildifier" --config=test_dir/.buildifier.test.json < test_dir/test.bzl > test_dir/test.bzl.BUILD.out
+"$buildifier" --config=example > test_dir/.buildifier.example.json
 "$buildifier2" test_dir/test.bzl > test_dir/test.bzl.out
 
 cat > golden/BUILD.golden <<EOF
@@ -136,6 +145,7 @@ foo(
     ],
 )
 EOF
+
 cat > golden/test.bzl.golden <<EOF
 load(":foo.bzl", "foo")
 
@@ -170,7 +180,7 @@ use_repo(
     "bazel_gazelle_go_repository_tools",
 )
 
-rules_go_non_module_deps = use_extension("@io_bazel_rules_go//go/private:extensions.bzl", "non_module_dependencies")
+rules_go_non_module_deps = use_extension("@io_bazel_rules_go//go/private:extensions.bzl", "non_module_dependencies", dev_dependency = True)
 use_repo(rules_go_non_module_deps, "go_googleapis")
 
 go_deps = use_extension("//:extensions.bzl", "go_deps")
@@ -222,11 +232,91 @@ use_repo(
     "b",
     "a",
 )
+
+bazel_dep(name = "prod_dep", version = "3.19.0")
+bazel_dep(name = "other_prod_dep", version = "3.19.0", dev_dependency = False)
+
+bazel_dep(name = "dev_dep", version = "3.19.0", dev_dependency = True)
+bazel_dep(name = "weird_dep", version = "3.19.0", dev_dependency = "True" == "True")
+
+bazel_dep(name = "yet_another_prod_dep", version = "3.19.0")
+EOF
+
+cat > golden/.buildifier.example.json <<EOF
+{
+  "type": "auto",
+  "mode": "fix",
+  "lint": "fix",
+  "warningsList": [
+    "attr-cfg",
+    "attr-license",
+    "attr-non-empty",
+    "attr-output-default",
+    "attr-single-file",
+    "build-args-kwargs",
+    "bzl-visibility",
+    "confusing-name",
+    "constant-glob",
+    "ctx-actions",
+    "ctx-args",
+    "deprecated-function",
+    "depset-items",
+    "depset-iteration",
+    "depset-union",
+    "dict-concatenation",
+    "dict-method-named-arg",
+    "duplicated-name",
+    "filetype",
+    "function-docstring",
+    "function-docstring-args",
+    "function-docstring-header",
+    "function-docstring-return",
+    "git-repository",
+    "http-archive",
+    "integer-division",
+    "keyword-positional-params",
+    "list-append",
+    "load",
+    "load-on-top",
+    "module-docstring",
+    "name-conventions",
+    "native-android",
+    "native-build",
+    "native-cc",
+    "native-java",
+    "native-package",
+    "native-proto",
+    "native-py",
+    "no-effect",
+    "out-of-order-load",
+    "output-group",
+    "overly-nested-depset",
+    "package-name",
+    "package-on-top",
+    "positional-args",
+    "print",
+    "provider-params",
+    "redefined-variable",
+    "repository-name",
+    "return-value",
+    "rule-impl-return",
+    "same-origin-load",
+    "skylark-comment",
+    "skylark-docstring",
+    "string-iteration",
+    "uninitialized",
+    "unnamed-macro",
+    "unreachable",
+    "unsorted-dict-items",
+    "unused-variable"
+  ]
+}
 EOF
 
 diff test_dir/BUILD golden/BUILD.golden
 diff test_dir/test.bzl golden/test.bzl.golden
 diff test_dir/subdir/test.bzl golden/test.bzl.golden
+diff test_dir/test.bzl.BUILD.out golden/BUILD.golden
 diff test_dir/subdir/build golden/build
 diff test_dir/foo.bar golden/foo.bar
 diff test.bzl golden/test.bzl.golden
@@ -235,6 +325,7 @@ diff stdout golden/test.bzl.golden
 diff test_dir/test.bzl.out golden/test.bzl.golden
 diff test_dir/.git/git.bzl golden/git.bzl
 diff test_dir/MODULE.bazel golden/MODULE.bazel.golden
+diff test_dir/.buildifier.example.json golden/.buildifier.example.json
 
 # Test run on a directory without -r
 "$buildifier" test_dir || ret=$?

@@ -20,7 +20,6 @@ package edit
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -39,26 +38,12 @@ var (
 	DeleteWithComments = true
 )
 
-// isFile returns true if the path refers to a regular file after following
-// symlinks.
-func isFile(path string) bool {
-	path, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.Mode().IsRegular()
-}
-
 // InterpretLabelForWorkspaceLocation returns the name of the BUILD file to
 // edit, the full package name, and the rule. It takes a workspace-rooted
 // directory to use.
-func InterpretLabelForWorkspaceLocation(root string, target string) (buildFile string, pkg string, rule string) {
+func InterpretLabelForWorkspaceLocation(root, target string) (buildFile, repo, pkg, rule string) {
 	label := labels.Parse(target)
-	repo := label.Repository
+	repo = label.Repository
 	pkg = label.Package
 	rule = label.Target
 	rootDir, relativePath := wspace.FindWorkspaceRoot(root)
@@ -66,7 +51,7 @@ func InterpretLabelForWorkspaceLocation(root string, target string) (buildFile s
 		files, err := wspace.FindRepoBuildFiles(rootDir)
 		if err == nil {
 			if buildFile, ok := files[repo]; ok {
-				return buildFile, pkg, rule
+				return buildFile, repo, pkg, rule
 			}
 		}
 		// TODO(rodrigoq): report error for other repos
@@ -75,7 +60,7 @@ func InterpretLabelForWorkspaceLocation(root string, target string) (buildFile s
 	defaultBuildFileName := "BUILD"
 	if strings.HasPrefix(target, "//") {
 		pkgPath := filepath.Join(rootDir, filepath.FromSlash(pkg))
-		if isFile(pkgPath) {
+		if wspace.IsRegularFile(pkgPath) {
 			// allow operation on other files like WORKSPACE
 			buildFile = pkgPath
 			pkg = path.Dir(pkg)
@@ -83,14 +68,14 @@ func InterpretLabelForWorkspaceLocation(root string, target string) (buildFile s
 		}
 		for _, buildFileName := range BuildFileNames {
 			buildFile = filepath.Join(pkgPath, buildFileName)
-			if isFile(buildFile) {
+			if wspace.IsRegularFile(buildFile) {
 				return
 			}
 		}
 		buildFile = filepath.Join(pkgPath, defaultBuildFileName)
 		return
 	}
-	if isFile(filepath.FromSlash(pkg)) {
+	if wspace.IsRegularFile(filepath.FromSlash(pkg)) {
 		// allow operation on other files like WORKSPACE
 		buildFile = pkg
 		pkg = filepath.Join(relativePath, filepath.FromSlash(path.Dir(pkg)))
@@ -100,7 +85,7 @@ func InterpretLabelForWorkspaceLocation(root string, target string) (buildFile s
 	found := false
 	for _, buildFileName := range BuildFileNames {
 		buildFile = filepath.Join(pkg, buildFileName)
-		if isFile(buildFile) {
+		if wspace.IsRegularFile(buildFile) {
 			found = true
 			break
 		}
@@ -116,6 +101,14 @@ func InterpretLabelForWorkspaceLocation(root string, target string) (buildFile s
 // InterpretLabel returns the name of the BUILD file to edit, the full
 // package name, and the rule. It uses the pwd for resolving workspace file paths.
 func InterpretLabel(target string) (buildFile string, pkg string, rule string) {
+	buildFile, _, pkg, rule = InterpretLabelForWorkspaceLocation("", target)
+	return buildFile, pkg, rule
+}
+
+// InterpretLabelWithRepo returns the name of the BUILD file to edit, repo name,
+// the full package name, and the rule. It uses the pwd for resolving workspace
+// file paths.
+func InterpretLabelWithRepo(target string) (buildFile string, repo string, pkg string, rule string) {
 	return InterpretLabelForWorkspaceLocation("", target)
 }
 
@@ -131,7 +124,7 @@ func ExprToRule(expr build.Expr, kind string) (*build.Rule, bool) {
 	if !ok || k.Name != kind {
 		return nil, false
 	}
-	return &build.Rule{call, ""}, true
+	return &build.Rule{Call: call, ImplicitName: ""}, true
 }
 
 // ExistingPackageDeclaration returns the package declaration, or nil if there is none.
@@ -177,7 +170,7 @@ func PackageDeclaration(f *build.File) *build.Rule {
 	all = append(all, f.Stmt[insertAfter+1:]...)
 	f.Stmt = all
 
-	return &build.Rule{call, ""}
+	return &build.Rule{Call: call, ImplicitName: ""}
 }
 
 // RemoveEmptyPackage removes empty package declarations from the file, i.e.:
@@ -194,7 +187,7 @@ func RemoveEmptyPackage(f *build.File) *build.File {
 		}
 		all = append(all, stmt)
 	}
-	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: build.TypeBuild}
+	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: f.Type}
 }
 
 func isEmptyPackage(expr build.Expr) bool {
@@ -210,6 +203,31 @@ func isEmptyPackage(expr build.Expr) bool {
 func isWorkspaceCall(expr build.Expr) bool {
 	if call, ok := expr.(*build.CallExpr); ok {
 		if ident, ok := call.X.(*build.Ident); ok && ident.Name == "workspace" {
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveEmptyUseRepoCalls removes empty use repo declarations from the file.
+func RemoveEmptyUseRepoCalls(f *build.File) *build.File {
+	if f.Type != build.TypeModule {
+		return f
+	}
+	var all []build.Expr
+	for _, stmt := range f.Stmt {
+		if isEmptyUseRepoCall(stmt) {
+			continue
+		}
+		all = append(all, stmt)
+	}
+	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: build.TypeModule}
+}
+
+func isEmptyUseRepoCall(expr build.Expr) bool {
+	if call, ok := expr.(*build.CallExpr); ok {
+		functionName, ok := call.X.(*build.Ident)
+		if ok && functionName.Name == "use_repo" && len(call.List) == 1 {
 			return true
 		}
 	}
@@ -330,7 +348,7 @@ func DeleteRule(f *build.File, rule *build.Rule) *build.File {
 		}
 		all = append(all, stmt)
 	}
-	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: build.TypeBuild}
+	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: f.Type}
 }
 
 // DeleteRuleByName returns the AST without the rules that have the
@@ -348,7 +366,7 @@ func DeleteRuleByName(f *build.File, name string) *build.File {
 			all = append(all, stmt)
 		}
 	}
-	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: build.TypeBuild}
+	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: f.Type}
 }
 
 // DeleteRuleByKind removes the rules of the specified kind from the AST.
@@ -366,7 +384,7 @@ func DeleteRuleByKind(f *build.File, kind string) *build.File {
 			all = append(all, stmt)
 		}
 	}
-	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: build.TypeBuild}
+	return &build.File{Path: f.Path, Comments: f.Comments, Stmt: all, Type: f.Type}
 }
 
 // AllLists returns all the lists concatenated in an expression.
